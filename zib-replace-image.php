@@ -35,14 +35,12 @@ add_action('admin_menu', 'zib_replace_image_menu');
  * @description: 处理替换请求
  * @param {string} $old_domain 旧域名
  * @param {string} $new_domain 新域名
- * @param {string} $old_path 旧路径前缀
- * @param {string} $new_path 新路径前缀
  * @param {bool} $remove_scaled 是否去除-scaled
- * @param {bool} $remove_date_dir 是否去除年/月日期目录
+ * @param {bool} $remove_date_dir 是否将/wp-content/uploads/YYYY/MM/替换为/wp-content/uploads/tc/
  * @param {bool} $dry_run 是否仅预览
  * @return {array} 替换结果
  */
-function zib_replace_image_process($old_domain, $new_domain, $old_path, $new_path, $remove_scaled = true, $remove_date_dir = false, $dry_run = true)
+function zib_replace_image_process($old_domain, $new_domain, $remove_scaled = true, $remove_date_dir = false, $dry_run = true)
 {
     global $wpdb;
 
@@ -52,10 +50,10 @@ function zib_replace_image_process($old_domain, $new_domain, $old_path, $new_pat
         'details' => array(),
     );
 
-    // 构建搜索关键词：用旧域名在帖子内容中查找
+    // 构建搜索关键词：用旧域名在帖子内容中查找（不限制文章类型和状态）
     $posts = $wpdb->get_results(
         $wpdb->prepare(
-            "SELECT ID, post_title, post_content FROM {$wpdb->posts} WHERE post_content LIKE %s AND post_status IN ('publish','draft','pending','private')",
+            "SELECT ID, post_title, post_content, post_type, post_status FROM {$wpdb->posts} WHERE post_content LIKE %s AND post_type NOT IN ('revision','nav_menu_item')",
             '%' . $wpdb->esc_like($old_domain) . '%'
         )
     );
@@ -75,18 +73,9 @@ function zib_replace_image_process($old_domain, $new_domain, $old_path, $new_pat
             $new_content = str_replace($old_domain, $new_domain, $new_content);
         }
 
-        // 替换路径：当启用去除日期目录时，直接用正则将 /wp-content/uploads/YYYY/MM/ 替换为新路径
-        // 避免分步替换导致的 wp-content 重复问题
-        if ($remove_date_dir && !empty($new_path)) {
-            $escaped_new_path = '/' . ltrim($new_path, '/');
-            $new_content = preg_replace('/\/wp-content\/uploads\/\d{4}\/\d{2}\//', $escaped_new_path, $new_content);
-        } elseif ($remove_date_dir) {
-            $new_content = preg_replace('/(\/wp-content\/uploads\/)\d{4}\/\d{2}\//', '$1', $new_content);
-        }
-
-        // 替换路径前缀（仅在未启用日期目录去除时使用，避免重复替换）
-        if (!$remove_date_dir && !empty($old_path) && !empty($new_path)) {
-            $new_content = str_replace($old_path, $new_path, $new_content);
+        // 固定替换路径：将 /wp-content/uploads/YYYY/MM/ 替换为 /wp-content/uploads/tc/
+        if ($remove_date_dir) {
+            $new_content = preg_replace('/\/wp-content\/uploads\/\d{4}\/\d{2}\//', '/wp-content/uploads/tc/', $new_content);
         }
 
         // 去除-scaled
@@ -97,8 +86,10 @@ function zib_replace_image_process($old_domain, $new_domain, $old_path, $new_pat
         if ($old_content !== $new_content) {
             $results['changed']++;
             $results['details'][] = array(
-                'id'    => $post->ID,
-                'title' => $post->post_title,
+                'id'     => $post->ID,
+                'title'  => $post->post_title,
+                'type'   => $post->post_type,
+                'status' => $post->post_status,
             );
 
             if (!$dry_run) {
@@ -138,8 +129,6 @@ function zib_replace_image_page()
 
         $old_domain     = isset($_POST['old_domain']) ? sanitize_text_field(wp_unslash($_POST['old_domain'])) : '';
         $new_domain     = isset($_POST['new_domain']) ? sanitize_text_field(wp_unslash($_POST['new_domain'])) : '';
-        $old_path       = isset($_POST['old_path']) ? sanitize_text_field(wp_unslash($_POST['old_path'])) : '';
-        $new_path       = isset($_POST['new_path']) ? sanitize_text_field(wp_unslash($_POST['new_path'])) : '';
         $remove_scaled  = isset($_POST['remove_scaled']) ? true : false;
         $remove_date_dir = isset($_POST['remove_date_dir']) ? true : false;
         $action_type    = sanitize_text_field(wp_unslash($_POST['zib_replace_action']));
@@ -148,7 +137,7 @@ function zib_replace_image_page()
             $message = '<div class="notice notice-error"><p>请填写旧域名。</p></div>';
         } else {
             $dry_run = ($action_type === 'preview');
-            $results = zib_replace_image_process($old_domain, $new_domain, $old_path, $new_path, $remove_scaled, $remove_date_dir, $dry_run);
+            $results = zib_replace_image_process($old_domain, $new_domain, $remove_scaled, $remove_date_dir, $dry_run);
 
             if ($dry_run) {
                 $message = '<div class="notice notice-info"><p>预览完成：共找到 ' . esc_html($results['total']) . ' 篇包含旧链接的文章，其中 ' . esc_html($results['changed']) . ' 篇将被修改。</p></div>';
@@ -161,7 +150,7 @@ function zib_replace_image_page()
     ?>
     <div class="wrap">
         <h1>替换帖子图片链接</h1>
-        <p class="description">批量替换文章中的图片链接。支持域名替换、路径替换、去除年/月日期目录、去除-scaled后缀等操作。</p>
+        <p class="description">批量替换文章中的图片链接。支持域名替换、自动将 <code>/wp-content/uploads/YYYY/MM/</code> 替换为 <code>/wp-content/uploads/tc/</code>、去除-scaled后缀等操作。</p>
         <p class="description"><strong>示例：</strong><br>
             旧链接：<code>https://wp-cs-files-tc.yuelk.com/wp-content/uploads/2025/08/20250826212841535-IMG_0546-scaled.webp</code><br>
             新链接：<code>http://192.168.50.154/wp-content/uploads/tc/20250826212841535-IMG_0546.webp</code><br>
@@ -193,24 +182,6 @@ function zib_replace_image_page()
                     </td>
                 </tr>
                 <tr>
-                    <th scope="row"><label for="old_path">旧路径前缀</label></th>
-                    <td>
-                        <input type="text" id="old_path" name="old_path" class="regular-text"
-                               placeholder="例如：wp-content/uploads/"
-                               value="<?php echo isset($_POST['old_path']) ? esc_attr(sanitize_text_field(wp_unslash($_POST['old_path']))) : ''; ?>">
-                        <p class="description">要替换的旧路径前缀（可选），如 <code>wp-content/uploads/</code>（年/月目录可通过下方选项自动去除）</p>
-                    </td>
-                </tr>
-                <tr>
-                    <th scope="row"><label for="new_path">新路径前缀</label></th>
-                    <td>
-                        <input type="text" id="new_path" name="new_path" class="regular-text"
-                               placeholder="例如：/wp-content/uploads/tc/"
-                               value="<?php echo isset($_POST['new_path']) ? esc_attr(sanitize_text_field(wp_unslash($_POST['new_path']))) : ''; ?>">
-                        <p class="description">替换后的新路径前缀（可选），如 <code>/wp-content/uploads/tc/</code>。<br>启用「去除年/月日期目录」时，<code>/wp-content/uploads/YYYY/MM/</code> 会直接替换为此路径。</p>
-                    </td>
-                </tr>
-                <tr>
                     <th scope="row">去除-scaled</th>
                     <td>
                         <label for="remove_scaled">
@@ -222,14 +193,14 @@ function zib_replace_image_page()
                     </td>
                 </tr>
                 <tr>
-                    <th scope="row">去除年/月日期目录</th>
+                    <th scope="row">替换日期目录为tc</th>
                     <td>
                         <label for="remove_date_dir">
                             <input type="checkbox" id="remove_date_dir" name="remove_date_dir" value="1"
                                 <?php echo (!isset($_POST['zib_replace_action']) || isset($_POST['remove_date_dir'])) ? 'checked' : ''; ?>>
-                            去除上传路径中的 <code>YYYY/MM/</code> 年月日期目录
+                            将上传路径中的 <code>/wp-content/uploads/YYYY/MM/</code> 替换为 <code>/wp-content/uploads/tc/</code>
                         </label>
-                        <p class="description">例如：<code>/wp-content/uploads/2025/08/image.webp</code> → <code>/wp-content/uploads/tc/image.webp</code>（需填写新路径前缀）</p>
+                        <p class="description">例如：<code>/wp-content/uploads/2025/08/image.webp</code> → <code>/wp-content/uploads/tc/image.webp</code></p>
                     </td>
                 </tr>
             </table>
@@ -249,6 +220,8 @@ function zib_replace_image_page()
                     <tr>
                         <th style="width:80px;">文章ID</th>
                         <th>文章标题</th>
+                        <th style="width:100px;">类型</th>
+                        <th style="width:100px;">状态</th>
                         <th style="width:100px;">操作</th>
                     </tr>
                 </thead>
@@ -257,6 +230,8 @@ function zib_replace_image_page()
                         <tr>
                             <td><?php echo esc_html($detail['id']); ?></td>
                             <td><?php echo esc_html($detail['title']); ?></td>
+                            <td><?php echo esc_html($detail['type']); ?></td>
+                            <td><?php echo esc_html($detail['status']); ?></td>
                             <td><a href="<?php echo esc_url(get_edit_post_link($detail['id'])); ?>" target="_blank">编辑</a></td>
                         </tr>
                     <?php endforeach; ?>
