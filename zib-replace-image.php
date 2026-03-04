@@ -62,6 +62,10 @@ function zib_replace_image_process($old_domain, $new_domain, $old_path, $new_pat
 
     $results['total'] = count($posts);
 
+    // 规范化域名，去除尾部斜杠，避免替换后缺少斜杠
+    $old_domain = rtrim($old_domain, '/');
+    $new_domain = rtrim($new_domain, '/');
+
     foreach ($posts as $post) {
         $old_content = $post->post_content;
         $new_content = $old_content;
@@ -71,14 +75,18 @@ function zib_replace_image_process($old_domain, $new_domain, $old_path, $new_pat
             $new_content = str_replace($old_domain, $new_domain, $new_content);
         }
 
-        // 替换路径前缀
-        if (!empty($old_path) && !empty($new_path)) {
-            $new_content = str_replace($old_path, $new_path, $new_content);
+        // 替换路径：当启用去除日期目录时，直接用正则将 /wp-content/uploads/YYYY/MM/ 替换为新路径
+        // 避免分步替换导致的 wp-content 重复问题
+        if ($remove_date_dir && !empty($new_path)) {
+            $escaped_new_path = '/' . ltrim($new_path, '/');
+            $new_content = preg_replace('/\/wp-content\/uploads\/\d{4}\/\d{2}\//', $escaped_new_path, $new_content);
+        } elseif ($remove_date_dir) {
+            $new_content = preg_replace('/(\/wp-content\/uploads\/)\d{4}\/\d{2}\//', '$1', $new_content);
         }
 
-        // 去除年/月日期目录（如 2025/08/）
-        if ($remove_date_dir) {
-            $new_content = preg_replace('/(wp-content\/uploads\/(?:[a-zA-Z0-9_-]+\/)?)(\d{4}\/\d{2}\/)/', '$1', $new_content);
+        // 替换路径前缀（仅在未启用日期目录去除时使用，避免重复替换）
+        if (!$remove_date_dir && !empty($old_path) && !empty($new_path)) {
+            $new_content = str_replace($old_path, $new_path, $new_content);
         }
 
         // 去除-scaled
@@ -197,9 +205,9 @@ function zib_replace_image_page()
                     <th scope="row"><label for="new_path">新路径前缀</label></th>
                     <td>
                         <input type="text" id="new_path" name="new_path" class="regular-text"
-                               placeholder="例如：wp-content/uploads/tc/"
+                               placeholder="例如：/wp-content/uploads/tc/"
                                value="<?php echo isset($_POST['new_path']) ? esc_attr(sanitize_text_field(wp_unslash($_POST['new_path']))) : ''; ?>">
-                        <p class="description">替换后的新路径前缀（可选），如 <code>wp-content/uploads/tc/</code></p>
+                        <p class="description">替换后的新路径前缀（可选），如 <code>/wp-content/uploads/tc/</code>。<br>启用「去除年/月日期目录」时，<code>/wp-content/uploads/YYYY/MM/</code> 会直接替换为此路径。</p>
                     </td>
                 </tr>
                 <tr>
@@ -221,7 +229,7 @@ function zib_replace_image_page()
                                 <?php echo (!isset($_POST['zib_replace_action']) || isset($_POST['remove_date_dir'])) ? 'checked' : ''; ?>>
                             去除上传路径中的 <code>YYYY/MM/</code> 年月日期目录
                         </label>
-                        <p class="description">例如：<code>wp-content/uploads/tc/2025/08/image.webp</code> → <code>wp-content/uploads/tc/image.webp</code></p>
+                        <p class="description">例如：<code>/wp-content/uploads/2025/08/image.webp</code> → <code>/wp-content/uploads/tc/image.webp</code>（需填写新路径前缀）</p>
                     </td>
                 </tr>
             </table>
