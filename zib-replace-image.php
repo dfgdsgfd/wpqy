@@ -61,6 +61,52 @@ function zib_replace_content($content, $old_domain, $new_domain, $remove_scaled,
 }
 
 /**
+ * @description: 获取数据库诊断信息
+ * @param {string} $search_keyword 搜索关键词
+ * @return {array} 诊断结果
+ */
+function zib_replace_image_diagnose($search_keyword)
+{
+    global $wpdb;
+
+    $diag = array(
+        'db_error'       => '',
+        'posts_table'    => $wpdb->posts,
+        'postmeta_table' => $wpdb->postmeta,
+        'total_posts'    => 0,
+        'sample_urls'    => array(),
+    );
+
+    // 统计数据库中的总文章数
+    $diag['total_posts'] = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->posts}");
+    if ($wpdb->last_error) {
+        $diag['db_error'] = $wpdb->last_error;
+        return $diag;
+    }
+
+    // 从数据库中提取包含 http 的文章内容片段，帮助用户了解实际存储的 URL 格式
+    $sample_rows = $wpdb->get_results(
+        "SELECT ID, post_title, SUBSTRING(post_content, 1, 500) AS content_sample FROM {$wpdb->posts} WHERE post_content LIKE '%http%' AND post_type NOT IN ('revision','nav_menu_item','customize_changeset') LIMIT 3"
+    );
+    if ($sample_rows) {
+        foreach ($sample_rows as $row) {
+            // 提取内容中的 URL
+            if (preg_match_all('/https?:\/\/[^\s"\'<>\)]+/', $row->content_sample, $matches)) {
+                foreach (array_slice($matches[0], 0, 2) as $url) {
+                    $diag['sample_urls'][] = array(
+                        'post_id'    => $row->ID,
+                        'post_title' => $row->post_title,
+                        'url'        => $url,
+                    );
+                }
+            }
+        }
+    }
+
+    return $diag;
+}
+
+/**
  * @description: 处理替换请求
  * @param {string} $old_domain 旧域名
  * @param {string} $new_domain 新域名
@@ -73,13 +119,19 @@ function zib_replace_image_process($old_domain, $new_domain, $remove_scaled = tr
 {
     global $wpdb;
 
+    // 规范化域名，去除尾部斜杠
+    $old_domain = rtrim($old_domain, '/');
+    $new_domain = rtrim($new_domain, '/');
+
     $results = array(
-        'total'       => 0,
-        'changed'     => 0,
-        'meta_total'  => 0,
+        'total'        => 0,
+        'changed'      => 0,
+        'meta_total'   => 0,
         'meta_changed' => 0,
-        'details'     => array(),
-        'search_term' => $old_domain,
+        'details'      => array(),
+        'search_term'  => $old_domain,
+        'db_error'     => '',
+        'diagnostics'  => zib_replace_image_diagnose($old_domain),
     );
 
     $search_term = '%' . $wpdb->esc_like($old_domain) . '%';
@@ -93,11 +145,15 @@ function zib_replace_image_process($old_domain, $new_domain, $remove_scaled = tr
         )
     );
 
-    $results['total'] = count($posts);
+    if ($wpdb->last_error) {
+        $results['db_error'] = $wpdb->last_error;
+    }
 
-    // 规范化域名，去除尾部斜杠，避免替换后缺少斜杠
-    $old_domain = rtrim($old_domain, '/');
-    $new_domain = rtrim($new_domain, '/');
+    if (!is_array($posts)) {
+        $posts = array();
+    }
+
+    $results['total'] = count($posts);
 
     foreach ($posts as $post) {
         $old_content = $post->post_content;
@@ -142,13 +198,16 @@ function zib_replace_image_process($old_domain, $new_domain, $remove_scaled = tr
     // 搜索 wp_postmeta：在 meta_value 中查找（排除序列化的值，避免数据损坏）
     $metas = $wpdb->get_results(
         $wpdb->prepare(
-            "SELECT meta_id, post_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_value LIKE %s AND meta_value NOT LIKE %s AND meta_value NOT LIKE %s AND meta_value NOT LIKE %s",
+            "SELECT meta_id, post_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_value LIKE %s AND meta_value NOT LIKE %s AND meta_value NOT LIKE %s",
             $search_term,
             'a:%',
-            'O:%',
-            's:%'
+            'O:%'
         )
     );
+
+    if (!is_array($metas)) {
+        $metas = array();
+    }
 
     $results['meta_total'] = count($metas);
     $meta_post_ids = array();
@@ -225,6 +284,37 @@ function zib_replace_image_page()
                     . '搜索关键词：<code>' . esc_html($results['search_term']) . '</code><br>'
                     . '文章内容：共找到 ' . esc_html($results['total']) . ' 篇包含旧链接的文章，其中 ' . esc_html($results['changed']) . ' 篇将被修改。<br>'
                     . '文章元数据：共找到 ' . esc_html($results['meta_total']) . ' 条包含旧链接的元数据，涉及 ' . esc_html($results['meta_changed']) . ' 篇文章将被修改。</p></div>';
+
+                // 如果找到 0 篇文章，显示诊断信息帮助排查问题
+                if ($results['total'] === 0 && $results['meta_total'] === 0 && !empty($results['diagnostics'])) {
+                    $diag = $results['diagnostics'];
+                    $message .= '<div class="notice notice-warning"><p><strong>诊断信息：</strong><br>';
+                    $message .= '数据库表：<code>' . esc_html($diag['posts_table']) . '</code> / <code>' . esc_html($diag['postmeta_table']) . '</code><br>';
+                    $message .= '数据库中总记录数：' . esc_html($diag['total_posts']) . ' 条<br>';
+
+                    if (!empty($diag['db_error'])) {
+                        $message .= '<span style="color:red;">数据库错误：' . esc_html($diag['db_error']) . '</span><br>';
+                    }
+
+                    if (!empty($results['db_error'])) {
+                        $message .= '<span style="color:red;">查询错误：' . esc_html($results['db_error']) . '</span><br>';
+                    }
+
+                    if (!empty($diag['sample_urls'])) {
+                        $message .= '<br><strong>数据库中的 URL 示例（帮助确认实际存储格式）：</strong><br>';
+                        foreach ($diag['sample_urls'] as $sample) {
+                            $message .= '文章 #' . esc_html($sample['post_id']) . ' (' . esc_html($sample['post_title']) . '): <code>' . esc_html($sample['url']) . '</code><br>';
+                        }
+                    } else {
+                        $message .= '<em>未在数据库文章内容中找到任何 http 链接。</em><br>';
+                    }
+
+                    if ($diag['total_posts'] === 0) {
+                        $message .= '<br><span style="color:red;"><strong>⚠ 数据库中没有任何文章记录，请检查数据库连接和表前缀是否正确。</strong></span><br>';
+                    }
+
+                    $message .= '</p></div>';
+                }
             } else {
                 $message = '<div class="notice notice-success"><p>替换完成：<br>'
                     . '文章内容：共处理 ' . esc_html($results['total']) . ' 篇文章，成功修改 ' . esc_html($results['changed']) . ' 篇。<br>'
