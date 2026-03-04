@@ -1,13 +1,13 @@
 <?php
-/*
- * @Author        : Qinver
- * @Url           : zibll.com
- * @Date          : 2024-01-01 00:00:00
- * @LastEditTime  : 2024-01-01 00:00:00
- * @Email         : 770349780@qq.com
- * @Project       : Zibll子比主题
- * @Description   : WP替换帖子图片插件
- * @Read me       : 批量替换文章中的图片链接，支持域名替换、路径替换、去除scaled等操作
+/**
+ * Plugin Name: WP替换帖子图片
+ * Plugin URI: https://github.com/dfgdsgfd/wpqy
+ * Description: 批量替换文章中的图片链接，支持域名替换、路径替换、去除-scaled后缀等操作。
+ * Version: 1.0.0
+ * Author: Qinver
+ * Author URI: https://zibll.com
+ * License: GPL-2.0+
+ * Text Domain: zib-replace-image
  */
 
 if (!defined('ABSPATH')) {
