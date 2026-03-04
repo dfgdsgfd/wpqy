@@ -180,7 +180,8 @@ function zib_replace_image_page()
                     <th scope="row"><label for="old_path">旧路径前缀</label></th>
                     <td>
                         <input type="text" id="old_path" name="old_path" class="regular-text"
-                               placeholder="例如：wp-content/uploads/2025/08/">
+                               placeholder="例如：wp-content/uploads/2025/08/"
+                               value="<?php echo isset($_POST['old_path']) ? esc_attr(sanitize_text_field(wp_unslash($_POST['old_path']))) : ''; ?>">
                         <p class="description">要替换的旧路径前缀（可选），如 <code>wp-content/uploads/2025/08/</code></p>
                     </td>
                 </tr>
@@ -188,7 +189,8 @@ function zib_replace_image_page()
                     <th scope="row"><label for="new_path">新路径前缀</label></th>
                     <td>
                         <input type="text" id="new_path" name="new_path" class="regular-text"
-                               placeholder="例如：wp-content/uploads/tc/">
+                               placeholder="例如：wp-content/uploads/tc/"
+                               value="<?php echo isset($_POST['new_path']) ? esc_attr(sanitize_text_field(wp_unslash($_POST['new_path']))) : ''; ?>">
                         <p class="description">替换后的新路径前缀（可选），如 <code>wp-content/uploads/tc/</code></p>
                     </td>
                 </tr>
@@ -196,7 +198,8 @@ function zib_replace_image_page()
                     <th scope="row">去除-scaled</th>
                     <td>
                         <label for="remove_scaled">
-                            <input type="checkbox" id="remove_scaled" name="remove_scaled" value="1" checked>
+                            <input type="checkbox" id="remove_scaled" name="remove_scaled" value="1"
+                                <?php echo (!isset($_POST['zib_replace_action']) || isset($_POST['remove_scaled'])) ? 'checked' : ''; ?>>
                             去除图片文件名中的 <code>-scaled</code> 后缀
                         </label>
                         <p class="description">例如：<code>image-scaled.webp</code> → <code>image.webp</code></p>
