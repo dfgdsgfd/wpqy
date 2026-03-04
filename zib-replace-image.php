@@ -32,6 +32,35 @@ function zib_replace_image_menu()
 add_action('admin_menu', 'zib_replace_image_menu');
 
 /**
+ * @description: 对文本内容执行替换操作
+ * @param {string} $content 原始内容
+ * @param {string} $old_domain 旧域名（已规范化）
+ * @param {string} $new_domain 新域名（已规范化）
+ * @param {bool} $remove_scaled 是否去除-scaled
+ * @param {bool} $remove_date_dir 是否将/wp-content/uploads/YYYY/MM/替换为/wp-content/uploads/tc/
+ * @return {string} 替换后的内容
+ */
+function zib_replace_content($content, $old_domain, $new_domain, $remove_scaled, $remove_date_dir)
+{
+    // 替换域名
+    if (!empty($old_domain) && !empty($new_domain)) {
+        $content = str_replace($old_domain, $new_domain, $content);
+    }
+
+    // 固定替换路径：将 /wp-content/uploads/YYYY/MM/ 替换为 /wp-content/uploads/tc/
+    if ($remove_date_dir) {
+        $content = preg_replace('/\/wp-content\/uploads\/\d{4}\/\d{2}\//', '/wp-content/uploads/tc/', $content);
+    }
+
+    // 去除-scaled
+    if ($remove_scaled) {
+        $content = preg_replace('/-scaled(\.(webp|jpg|jpeg|png|gif|bmp|svg))/i', '$1', $content);
+    }
+
+    return $content;
+}
+
+/**
  * @description: 处理替换请求
  * @param {string} $old_domain 旧域名
  * @param {string} $new_domain 新域名
@@ -45,16 +74,22 @@ function zib_replace_image_process($old_domain, $new_domain, $remove_scaled = tr
     global $wpdb;
 
     $results = array(
-        'total'   => 0,
-        'changed' => 0,
-        'details' => array(),
+        'total'       => 0,
+        'changed'     => 0,
+        'meta_total'  => 0,
+        'meta_changed' => 0,
+        'details'     => array(),
+        'search_term' => $old_domain,
     );
 
-    // 构建搜索关键词：用旧域名在帖子内容中查找（不限制文章类型和状态）
+    $search_term = '%' . $wpdb->esc_like($old_domain) . '%';
+
+    // 搜索 wp_posts：在 post_content 和 post_excerpt 中查找，不限制任何类型和状态
     $posts = $wpdb->get_results(
         $wpdb->prepare(
-            "SELECT ID, post_title, post_content, post_type, post_status FROM {$wpdb->posts} WHERE post_content LIKE %s AND post_type NOT IN ('revision','nav_menu_item')",
-            '%' . $wpdb->esc_like($old_domain) . '%'
+            "SELECT ID, post_title, post_content, post_excerpt, post_type, post_status FROM {$wpdb->posts} WHERE post_content LIKE %s OR post_excerpt LIKE %s",
+            $search_term,
+            $search_term
         )
     );
 
@@ -66,42 +101,88 @@ function zib_replace_image_process($old_domain, $new_domain, $remove_scaled = tr
 
     foreach ($posts as $post) {
         $old_content = $post->post_content;
-        $new_content = $old_content;
+        $old_excerpt = $post->post_excerpt;
 
-        // 替换域名
-        if (!empty($old_domain) && !empty($new_domain)) {
-            $new_content = str_replace($old_domain, $new_domain, $new_content);
-        }
+        $new_content = zib_replace_content($old_content, $old_domain, $new_domain, $remove_scaled, $remove_date_dir);
+        $new_excerpt = zib_replace_content($old_excerpt, $old_domain, $new_domain, $remove_scaled, $remove_date_dir);
 
-        // 固定替换路径：将 /wp-content/uploads/YYYY/MM/ 替换为 /wp-content/uploads/tc/
-        if ($remove_date_dir) {
-            $new_content = preg_replace('/\/wp-content\/uploads\/\d{4}\/\d{2}\//', '/wp-content/uploads/tc/', $new_content);
-        }
-
-        // 去除-scaled
-        if ($remove_scaled) {
-            $new_content = preg_replace('/-scaled(\.(webp|jpg|jpeg|png|gif|bmp|svg))/i', '$1', $new_content);
-        }
-
-        if ($old_content !== $new_content) {
+        if ($old_content !== $new_content || $old_excerpt !== $new_excerpt) {
             $results['changed']++;
             $results['details'][] = array(
                 'id'     => $post->ID,
                 'title'  => $post->post_title,
                 'type'   => $post->post_type,
                 'status' => $post->post_status,
+                'source' => '文章内容',
             );
 
             if (!$dry_run) {
+                $update_data = array();
+                $update_format = array();
+                if ($old_content !== $new_content) {
+                    $update_data['post_content'] = $new_content;
+                    $update_format[] = '%s';
+                }
+                if ($old_excerpt !== $new_excerpt) {
+                    $update_data['post_excerpt'] = $new_excerpt;
+                    $update_format[] = '%s';
+                }
                 $wpdb->update(
                     $wpdb->posts,
-                    array('post_content' => $new_content),
+                    $update_data,
                     array('ID' => $post->ID),
+                    $update_format,
+                    array('%d')
+                );
+                clean_post_cache($post->ID);
+            }
+        }
+    }
+
+    // 搜索 wp_postmeta：在 meta_value 中查找（排除序列化的值，避免数据损坏）
+    $metas = $wpdb->get_results(
+        $wpdb->prepare(
+            "SELECT meta_id, post_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_value LIKE %s AND meta_value NOT LIKE %s AND meta_value NOT LIKE %s AND meta_value NOT LIKE %s",
+            $search_term,
+            'a:%',
+            'O:%',
+            's:%'
+        )
+    );
+
+    $results['meta_total'] = count($metas);
+    $meta_post_ids = array();
+    $title_cache = array();
+
+    foreach ($metas as $meta) {
+        $old_value = $meta->meta_value;
+        $new_value = zib_replace_content($old_value, $old_domain, $new_domain, $remove_scaled, $remove_date_dir);
+
+        if ($old_value !== $new_value) {
+            if (!isset($meta_post_ids[$meta->post_id])) {
+                $meta_post_ids[$meta->post_id] = true;
+                $results['meta_changed']++;
+
+                if (!isset($title_cache[$meta->post_id])) {
+                    $title_cache[$meta->post_id] = $wpdb->get_var($wpdb->prepare("SELECT post_title FROM {$wpdb->posts} WHERE ID = %d", $meta->post_id));
+                }
+                $results['details'][] = array(
+                    'id'     => $meta->post_id,
+                    'title'  => $title_cache[$meta->post_id] ? $title_cache[$meta->post_id] : '(无标题)',
+                    'type'   => 'postmeta',
+                    'status' => $meta->meta_key,
+                    'source' => '文章元数据',
+                );
+            }
+
+            if (!$dry_run) {
+                $wpdb->update(
+                    $wpdb->postmeta,
+                    array('meta_value' => $new_value),
+                    array('meta_id' => $meta->meta_id),
                     array('%s'),
                     array('%d')
                 );
-                // 清除缓存
-                clean_post_cache($post->ID);
             }
         }
     }
@@ -140,9 +221,14 @@ function zib_replace_image_page()
             $results = zib_replace_image_process($old_domain, $new_domain, $remove_scaled, $remove_date_dir, $dry_run);
 
             if ($dry_run) {
-                $message = '<div class="notice notice-info"><p>预览完成：共找到 ' . esc_html($results['total']) . ' 篇包含旧链接的文章，其中 ' . esc_html($results['changed']) . ' 篇将被修改。</p></div>';
+                $message = '<div class="notice notice-info"><p>预览完成：<br>'
+                    . '搜索关键词：<code>' . esc_html($results['search_term']) . '</code><br>'
+                    . '文章内容：共找到 ' . esc_html($results['total']) . ' 篇包含旧链接的文章，其中 ' . esc_html($results['changed']) . ' 篇将被修改。<br>'
+                    . '文章元数据：共找到 ' . esc_html($results['meta_total']) . ' 条包含旧链接的元数据，涉及 ' . esc_html($results['meta_changed']) . ' 篇文章将被修改。</p></div>';
             } else {
-                $message = '<div class="notice notice-success"><p>替换完成：共处理 ' . esc_html($results['total']) . ' 篇文章，成功修改 ' . esc_html($results['changed']) . ' 篇。</p></div>';
+                $message = '<div class="notice notice-success"><p>替换完成：<br>'
+                    . '文章内容：共处理 ' . esc_html($results['total']) . ' 篇文章，成功修改 ' . esc_html($results['changed']) . ' 篇。<br>'
+                    . '文章元数据：共处理 ' . esc_html($results['meta_total']) . ' 条元数据，涉及 ' . esc_html($results['meta_changed']) . ' 篇文章已修改。</p></div>';
             }
         }
     }
@@ -222,6 +308,7 @@ function zib_replace_image_page()
                         <th>文章标题</th>
                         <th style="width:100px;">类型</th>
                         <th style="width:100px;">状态</th>
+                        <th style="width:100px;">来源</th>
                         <th style="width:100px;">操作</th>
                     </tr>
                 </thead>
@@ -232,6 +319,7 @@ function zib_replace_image_page()
                             <td><?php echo esc_html($detail['title']); ?></td>
                             <td><?php echo esc_html($detail['type']); ?></td>
                             <td><?php echo esc_html($detail['status']); ?></td>
+                            <td><?php echo esc_html($detail['source']); ?></td>
                             <td><a href="<?php echo esc_url(get_edit_post_link($detail['id'])); ?>" target="_blank">编辑</a></td>
                         </tr>
                     <?php endforeach; ?>
